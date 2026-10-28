@@ -3,87 +3,267 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>제주 관광지 지도</title>
+    <title>ISS 한국 통과 시간표</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
     <style>
-        body { margin: 0; font-family: sans-serif; }
-        #bar { padding: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-        #map { height: calc(100vh - 90px); }
-        #msg { padding: 0 8px 6px; color: #555; font-size: 14px; }
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: "Malgun Gothic", sans-serif; background: #0b1020; color: #e8ecf5; }
+        #app { display: flex; height: 100vh; }
+        #side { width: 360px; padding: 16px; overflow-y: auto; background: #111833; border-right: 1px solid #222c52; }
+        #map { flex: 1; background: #0b1020; }
+        /* 지도 타일을 어둡게 */
+        .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.8) contrast(0.9); }
+        h1 { font-size: 20px; margin: 0 0 4px; }
+        .sub { color: #8f9bc4; font-size: 13px; margin-bottom: 14px; }
+        select { width: 100%; padding: 9px; border-radius: 8px; border: 1px solid #2c3866; background: #0b1020; color: #e8ecf5; font-size: 15px; }
+        .live { margin: 14px 0; padding: 12px; border-radius: 10px; background: #19224a; font-size: 14px; line-height: 1.7; }
+        .live b { color: #7fd1ff; }
+        .pass { padding: 10px 12px; margin-bottom: 8px; border-radius: 10px; background: #19224a; cursor: pointer; border: 1px solid transparent; font-size: 14px; line-height: 1.6; }
+        .pass:hover, .pass.on { border-color: #ffb454; }
+        .pass .t { font-size: 16px; font-weight: bold; }
+        .tag { display: inline-block; margin-top: 2px; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+        .ok { background: #1f6f4a; } .day { background: #6f5a1f; } .dark { background: #3a3f5c; }
+        .note { color: #8f9bc4; font-size: 12px; margin-top: 12px; line-height: 1.6; }
+        .iss-icon { font-size: 28px; filter: drop-shadow(0 0 6px #7fd1ff); }
+        @media (max-width: 800px) {
+            #app { flex-direction: column-reverse; height: auto; }
+            #side { width: 100%; border-right: 0; }
+            #map { height: 55vh; flex: none; }
+        }
     </style>
 </head>
 <body>
-    <div id="bar">
-        <select id="area">
-            <option>동쪽</option><option>서쪽</option><option>서귀포</option><option>제주시</option>
-        </select>
-        <select id="indoor">
-            <option value="">실내/야외 전체</option>
-            <option value="true">실내</option>
-            <option value="false">야외</option>
-        </select>
-        <button id="go">찾기</button>
+    <div id="app">
+        <div id="side">
+            <h1>🛰️ ISS 한국 통과 시간표</h1>
+            <div class="sub">도시를 고르면 앞으로 48시간 동안 ISS가 지나가는 시각을 계산해줘</div>
+            <select id="city"></select>
+            <div class="live" id="live">불러오는 중...</div>
+            <div id="passes"></div>
+            <div class="note" id="note"></div>
+        </div>
+        <div id="map"></div>
     </div>
-    <div id="msg"></div>
-    <div id="map"></div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/4.1.3/satellite.min.js"></script>
     <script>
-        // 로컬 서버로 열어야 fetch 가 동작함 (예: python -m http.server)
-        const MAX_RESULTS = 8
-        const map = L.map("map").setView([33.38, 126.55], 10)
+        const CITIES = {
+            "서울": [37.5665, 126.9780], "인천": [37.4563, 126.7052], "강릉": [37.7519, 128.8761],
+            "대전": [36.3504, 127.3845], "대구": [35.8714, 128.6014], "광주": [35.1595, 126.8526],
+            "부산": [35.1796, 129.0756], "제주": [33.4996, 126.5312]
+        }
+        const TLE_URL = "https://api.wheretheiss.at/v1/satellites/25544/tles?format=text"
+        const MIN_ELEVATION = 10      // 이 각도 이상 올라오는 통과만 보여줌
+        const HOURS = 48
+        const RAD = Math.PI / 180
+        const DIRS = ["북", "북동", "동", "남동", "남", "남서", "서", "북서"]
+
+        let satrec = null
+        let city = "서울"
+        let passes = []
+
+        // ---------- 지도 ----------
+        const map = L.map("map", { worldCopyJump: true }).setView([36, 128], 3)
         L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
             attribution: "&copy; OpenStreetMap contributors"
         }).addTo(map)
-        const layer = L.layerGroup().addTo(map)
-        const msg = document.getElementById("msg")
+        const orbitLayer = L.layerGroup().addTo(map)
+        const passLayer = L.layerGroup().addTo(map)
+        const issMarker = L.marker([0, 0], {
+            icon: L.divIcon({ className: "", html: '<div class="iss-icon">🛰️</div>', iconSize: [30, 30], iconAnchor: [15, 15] })
+        }).addTo(map)
+        let cityMarker = null
 
-        // api/tools.js 의 find_spots 와 같은 규칙
-        const find_spots = (spots, { area, indoor }) =>
-            spots
-                .filter((s) => s.area.split("(")[0] === area)
-                .filter((s) => indoor === undefined || s.indoor === indoor)
-                .slice(0, MAX_RESULTS)
+        // ---------- 계산 도우미 ----------
+        const compass = (deg) => DIRS[Math.round(deg / 45) % 8]
+        const fmt = (d) => d.toLocaleString("ko-KR", {
+            timeZone: "Asia/Seoul", month: "numeric", day: "numeric", weekday: "short",
+            hour: "2-digit", minute: "2-digit", hour12: false
+        })
 
-        // JSON 에 좌표가 없어서 OSM Nominatim 으로 이름 → 좌표 변환 (결과는 localStorage 에 저장)
-        const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-        const geocode = async (name) => {
-            const key = "geo:" + name
-            const saved = localStorage.getItem(key)
-            if (saved) return JSON.parse(saved)
-            const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=kr" +
-                "&viewbox=126.1,33.6,127.0,33.1&bounded=1&q=" + encodeURIComponent(name + " 제주")
-            const res = await (await fetch(url)).json()
-            const pos = res.length ? [Number(res[0].lat), Number(res[0].lon)] : null
-            localStorage.setItem(key, JSON.stringify(pos))
-            await sleep(1100) // Nominatim 사용 제한: 초당 1회
-            return pos
+        const issEci = (date) => {
+            const pv = satellite.propagate(satrec, date)
+            return pv.position || null
         }
 
-        document.getElementById("go").onclick = async () => {
-            const iv = document.getElementById("indoor").value
-            const input = { area: document.getElementById("area").value }
-            if (iv !== "") input.indoor = iv === "true"
+        // 태양 방향 단위벡터 (간단한 근사식)
+        const sunUnit = (date) => {
+            const n = date / 86400000 + 2440587.5 - 2451545.0
+            const L = (280.460 + 0.9856474 * n) * RAD
+            const g = (357.528 + 0.9856003 * n) * RAD
+            const lam = L + (1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * RAD
+            const eps = (23.439 - 0.0000004 * n) * RAD
+            return { x: Math.cos(lam), y: Math.cos(eps) * Math.sin(lam), z: Math.sin(eps) * Math.sin(lam) }
+        }
 
-            layer.clearLayers()
-            msg.textContent = "찾는 중..."
-            const { spots } = await (await fetch("jeju_spots.json")).json()
-            const found = find_spots(spots, input)
+        // ISS 가 지구 그림자 속인지
+        const inShadow = (r, s) => {
+            const d = r.x * s.x + r.y * s.y + r.z * s.z
+            if (d >= 0) return false
+            const px = r.x - d * s.x, py = r.y - d * s.y, pz = r.z - d * s.z
+            return Math.sqrt(px * px + py * py + pz * pz) < 6371
+        }
 
-            const points = []
-            const failed = []
-            for (const s of found) {
-                const pos = await geocode(s.name)
-                if (!pos) { failed.push(s.name); continue }
-                const box = document.createElement("div")
-                box.textContent = `${s.name} · ${s.area} · ${s.indoor ? "실내" : "야외"} · ${s.type}`
-                L.marker(pos).bindPopup(box).addTo(layer)
-                points.push(pos)
-                if (points.length) map.fitBounds(points, { maxZoom: 12, padding: [30, 30] })
+        // 관측자 기준 ISS 고도/방위, 태양 고도
+        const look = (date, lat, lon) => {
+            const r = issEci(date)
+            if (!r) return null
+            const gmst = satellite.gstime(date)
+            const obs = { latitude: lat * RAD, longitude: lon * RAD, height: 0 }
+            const la = satellite.ecfToLookAngles(obs, satellite.eciToEcf(r, gmst))
+            const up = satellite.ecfToEci(satellite.geodeticToEcf(obs), gmst)
+            const len = Math.sqrt(up.x * up.x + up.y * up.y + up.z * up.z)
+            const s = sunUnit(date)
+            const sunEl = Math.asin((up.x * s.x + up.y * s.y + up.z * s.z) / len) / RAD
+            return { el: la.elevation / RAD, az: la.azimuth / RAD, sunEl, shadow: inShadow(r, s), r, gmst }
+        }
+
+        const subPoint = (date) => {
+            const r = issEci(date)
+            if (!r) return null
+            const g = satellite.eciToGeodetic(r, satellite.gstime(date))
+            return [satellite.degreesLat(g.latitude), satellite.degreesLong(g.longitude), g.height]
+        }
+
+        // ---------- 통과 예측 ----------
+        const findPasses = (lat, lon) => {
+            const out = []
+            const STEP = 20 * 1000
+            const t0 = Date.now()
+            let cur = null
+            for (let t = t0; t < t0 + HOURS * 3600000; t += STEP) {
+                const date = new Date(t)
+                const p = look(date, lat, lon)
+                if (!p) continue
+                if (p.el > 0) {
+                    if (!cur) cur = { start: date, startAz: p.az, max: p, maxDate: date, path: [] }
+                    const pos = subPoint(date)
+                    if (pos) cur.path.push([pos[0], pos[1]])
+                    if (p.el > cur.max.el) { cur.max = p; cur.maxDate = date }
+                    cur.end = date; cur.endAz = p.az
+                } else if (cur) {
+                    out.push(cur); cur = null
+                }
             }
-            msg.textContent = `${found.length}곳 중 ${points.length}곳 표시` +
-                (failed.length ? ` (위치를 못 찾음: ${failed.join(", ")})` : "")
+            return out.filter((p) => p.max.el >= MIN_ELEVATION)
         }
+
+        const visibility = (p) => {
+            if (p.max.sunEl > -6) return ["day", "☀️ 하늘이 밝아서 안 보여"]
+            if (p.max.shadow) return ["dark", "🌑 ISS가 지구 그림자 속이라 안 보여"]
+            return ["ok", "✅ 맨눈으로 볼 수 있어!"]
+        }
+
+        // ---------- 화면 ----------
+        const drawLine = (layer, pts, opt) => {
+            // 날짜변경선을 넘으면 선을 끊어서 그림
+            let seg = []
+            pts.forEach((pt, i) => {
+                if (i && Math.abs(pt[1] - pts[i - 1][1]) > 180) { L.polyline(seg, opt).addTo(layer); seg = [] }
+                seg.push(pt)
+            })
+            L.polyline(seg, opt).addTo(layer)
+        }
+
+        const drawOrbit = () => {
+            orbitLayer.clearLayers()
+            const now = Date.now()
+            const past = [], future = []
+            for (let m = -45; m <= 95; m++) {
+                const pos = subPoint(new Date(now + m * 60000))
+                if (pos) (m <= 0 ? past : future).push([pos[0], pos[1]])
+            }
+            drawLine(orbitLayer, past, { color: "#5b6aa8", weight: 2, dashArray: "4 6" })
+            drawLine(orbitLayer, future, { color: "#7fd1ff", weight: 2 })
+        }
+
+        const renderPasses = () => {
+            const box = document.getElementById("passes")
+            box.innerHTML = ""
+            if (!passes.length) { box.textContent = `앞으로 ${HOURS}시간 동안 ${MIN_ELEVATION}° 이상 올라오는 통과가 없어 😢`; return }
+            passes.forEach((p, i) => {
+                const [cls, label] = visibility(p)
+                const min = Math.round((p.end - p.start) / 60000)
+                const div = document.createElement("div")
+                div.className = "pass"
+                div.innerHTML =
+                    `<div class="t">${fmt(p.maxDate)}</div>` +
+                    `<div>${compass(p.startAz)}쪽에서 떠서 ${compass(p.endAz)}쪽으로 사라져 · 약 ${min}분</div>` +
+                    `<div>가장 높을 때 ${Math.round(p.max.el)}° (${compass(p.max.az)}쪽 하늘)</div>` +
+                    `<span class="tag ${cls}">${label}</span>`
+                div.onclick = () => {
+                    document.querySelectorAll(".pass").forEach((e) => e.classList.remove("on"))
+                    div.classList.add("on")
+                    passLayer.clearLayers()
+                    drawLine(passLayer, p.path, { color: "#ffb454", weight: 5 })
+                    map.fitBounds([CITIES[city], ...p.path], { padding: [40, 40], maxZoom: 6 })
+                }
+                box.appendChild(div)
+            })
+        }
+
+        const selectCity = () => {
+            const [lat, lon] = CITIES[city]
+            if (cityMarker) cityMarker.remove()
+            cityMarker = L.circleMarker([lat, lon], { radius: 8, color: "#ffb454", fillOpacity: 0.9 })
+                .bindTooltip(city, { permanent: true, direction: "right" }).addTo(map)
+            passLayer.clearLayers()
+            passes = findPasses(lat, lon)
+            renderPasses()
+        }
+
+        const updateLive = () => {
+            const now = new Date()
+            const pos = subPoint(now)
+            if (!pos) return
+            issMarker.setLatLng([pos[0], pos[1]])
+            const [lat, lon] = CITIES[city]
+            const p = look(now, lat, lon)
+            const state = p.el > 0
+                ? `<b>지금 ${city} 하늘 위에 떠 있어!</b> (고도 ${Math.round(p.el)}°)`
+                : `${city}에서는 아직 지평선 아래야 (${Math.round(p.el)}°)`
+            document.getElementById("live").innerHTML =
+                `ISS 현재 위치: 위도 ${pos[0].toFixed(1)}° / 경도 ${pos[1].toFixed(1)}°<br>` +
+                `고도 약 ${Math.round(pos[2])}km · 시속 약 27,600km<br>${state}`
+        }
+
+        // ---------- TLE 불러오기 ----------
+        const loadTle = async () => {
+            let text = null
+            try {
+                text = await (await fetch(TLE_URL)).text()
+                try { localStorage.setItem("iss-tle", text) } catch (e) {}
+            } catch (e) {
+                try { text = localStorage.getItem("iss-tle") } catch (e2) {}
+            }
+            if (!text) throw new Error("TLE 를 못 불러왔어")
+            const lines = text.trim().split("\n").map((l) => l.trim())
+            const [l1, l2] = lines.slice(-2)
+            satrec = satellite.twoline2satrec(l1, l2)
+
+            // 궤도 정보 기준일(epoch) 계산해서 오래됐으면 경고
+            const yy = Number(l1.substring(18, 20)), day = Number(l1.substring(20, 32))
+            const epoch = new Date(Date.UTC(2000 + yy, 0, 1) + (day - 1) * 86400000)
+            const age = (Date.now() - epoch) / 86400000
+            document.getElementById("note").innerHTML =
+                `🔭 궤도 데이터 기준일: ${fmt(epoch)} (${age.toFixed(1)}일 전)` +
+                (age > 3 ? "<br>⚠️ 데이터가 좀 오래돼서 예측 시각이 어긋날 수 있어." : "") +
+                `<br>맨눈 관측은 해가 진 뒤(태양 고도 -6° 이하)이고 ISS가 햇빛을 받을 때만 가능해. 시각은 한국 시간(KST)이야.`
+        }
+
+        // ---------- 시작 ----------
+        const sel = document.getElementById("city")
+        Object.keys(CITIES).forEach((c) => sel.add(new Option(c, c)))
+        sel.onchange = () => { city = sel.value; selectCity(); updateLive() }
+
+        loadTle().then(() => {
+            selectCity()
+            drawOrbit()
+            updateLive()
+            setInterval(updateLive, 1000)
+            setInterval(drawOrbit, 120000)
+        }).catch((e) => { document.getElementById("live").textContent = "😢 " + e.message })
     </script>
 </body>
 </html>
