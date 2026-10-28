@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>제주 관광지 지도</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+    <style>
+        body { margin: 0; font-family: sans-serif; }
+        #bar { padding: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        #map { height: calc(100vh - 90px); }
+        #msg { padding: 0 8px 6px; color: #555; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div id="bar">
+        <select id="area">
+            <option>동쪽</option><option>서쪽</option><option>서귀포</option><option>제주시</option>
+        </select>
+        <select id="indoor">
+            <option value="">실내/야외 전체</option>
+            <option value="true">실내</option>
+            <option value="false">야외</option>
+        </select>
+        <button id="go">찾기</button>
+    </div>
+    <div id="msg"></div>
+    <div id="map"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script>
+        // 로컬 서버로 열어야 fetch 가 동작함 (예: python -m http.server)
+        const MAX_RESULTS = 8
+        const map = L.map("map").setView([33.38, 126.55], 10)
+        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: "&copy; OpenStreetMap contributors"
+        }).addTo(map)
+        const layer = L.layerGroup().addTo(map)
+        const msg = document.getElementById("msg")
+
+        // api/tools.js 의 find_spots 와 같은 규칙
+        const find_spots = (spots, { area, indoor }) =>
+            spots
+                .filter((s) => s.area.split("(")[0] === area)
+                .filter((s) => indoor === undefined || s.indoor === indoor)
+                .slice(0, MAX_RESULTS)
+
+        // JSON 에 좌표가 없어서 OSM Nominatim 으로 이름 → 좌표 변환 (결과는 localStorage 에 저장)
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+        const geocode = async (name) => {
+            const key = "geo:" + name
+            const saved = localStorage.getItem(key)
+            if (saved) return JSON.parse(saved)
+            const url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=kr" +
+                "&viewbox=126.1,33.6,127.0,33.1&bounded=1&q=" + encodeURIComponent(name + " 제주")
+            const res = await (await fetch(url)).json()
+            const pos = res.length ? [Number(res[0].lat), Number(res[0].lon)] : null
+            localStorage.setItem(key, JSON.stringify(pos))
+            await sleep(1100) // Nominatim 사용 제한: 초당 1회
+            return pos
+        }
+
+        document.getElementById("go").onclick = async () => {
+            const iv = document.getElementById("indoor").value
+            const input = { area: document.getElementById("area").value }
+            if (iv !== "") input.indoor = iv === "true"
+
+            layer.clearLayers()
+            msg.textContent = "찾는 중..."
+            const { spots } = await (await fetch("jeju_spots.json")).json()
+            const found = find_spots(spots, input)
+
+            const points = []
+            const failed = []
+            for (const s of found) {
+                const pos = await geocode(s.name)
+                if (!pos) { failed.push(s.name); continue }
+                const box = document.createElement("div")
+                box.textContent = `${s.name} · ${s.area} · ${s.indoor ? "실내" : "야외"} · ${s.type}`
+                L.marker(pos).bindPopup(box).addTo(layer)
+                points.push(pos)
+                if (points.length) map.fitBounds(points, { maxZoom: 12, padding: [30, 30] })
+            }
+            msg.textContent = `${found.length}곳 중 ${points.length}곳 표시` +
+                (failed.length ? ` (위치를 못 찾음: ${failed.join(", ")})` : "")
+        }
+    </script>
+</body>
+</html>
